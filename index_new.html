@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <base href="./">
+  <title>Mariola — Nowa wersja</title>
+  <style>
+    :root { --bg:#86c9ff; --bg2:#cfeaff; --hud:rgba(0,0,0,.55); --accent:#2ecc71; }
+    html,body{margin:0;height:100%;background:var(--bg);font-family:system-ui,Segoe UI,Arial,sans-serif}
+    #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+    canvas{background:linear-gradient(var(--bg) 0%, var(--bg2) 70%);
+           width:100%; max-width:1080px; aspect-ratio:16/9; border-radius:14px;
+           box-shadow:0 14px 40px rgba(0,0,0,.25); image-rendering: pixelated; touch-action:none}
+    .hud{position:fixed;left:50%;top:10px;transform:translateX(-50%);background:var(--hud);color:#fff;
+         padding:8px 12px;border-radius:10px;font-weight:700;display:flex;gap:12px;flex-wrap:wrap;z-index:5}
+    .btn{position:fixed;right:10px;top:10px;background:#fff;border:1px solid #ddd;border-radius:10px;padding:8px 10px;cursor:pointer;z-index:5}
+    .help{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);
+          background:rgba(0,0,0,.35);color:#fff;padding:6px 10px;border-radius:8px;font-size:12px;z-index:5}
+    #mobile{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);display:none;gap:18px;z-index:6}
+    #mobile button{width:64px;height:64px;border:none;border-radius:50%;
+                   background:rgba(255,255,255,.8);box-shadow:0 6px 12px rgba(0,0,0,.3);font-size:24px}
+    @media (max-width: 900px){ #mobile{display:flex} }
+    .toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+           background:rgba(0,0,0,.75);color:#fff;padding:10px 14px;border-radius:10px;font-weight:800;z-index:10}
+  </style>
+</head>
+<body>
+  <div class="hud" id="hud">Ładowanie…</div>
+  <button class="btn" id="btnPause" title="P – pauza">⏸</button>
+  <div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
+  <div id="mobile">
+    <button id="mLeft">◀️</button>
+    <button id="mRight">▶️</button>
+    <button id="mJump">⬆️</button>
+    <button id="mDash">⚡</button>
+    <button id="mTime">⏱️</button>
+  </div>
+  <div class="help">Sterowanie: ← → / A D – ruch • ↑ / W / Spacja – skok (×2 – podwójny) • Shift / X – dash • T – spowolnienie czasu • P – pauza</div>
+
+<script>
+(() => {
+  /* =========================================================
+     0) SPRITES — konfiguracja i odporny loader zasobów
+  ========================================================= */
+  const SPRITES = {
+    hero:      { file:'hero',       cols:4, rows:2, anim:{ idle:[0,1], run:[2,3], jump:[4], fall:[5], attack:[6,7] }, fps:10 },
+    bat:       { file:'bat',        cols:3, rows:1, anim:{ fly:[0,1,2] }, fps:8 },
+    bird:      { file:'bird',       cols:2, rows:1, anim:{ fly:[0,1] }, fps:8 },
+    turtle:    { file:'turtle',     cols:2, rows:1, anim:{ walk:[0,1] }, fps:6 },
+    golem:     { file:'golem',      cols:3, rows:1, anim:{ walk:[0,1,2] }, fps:6 },
+    demon:     { file:'demon',      cols:2, rows:2, anim:{ idle:[0,1,2,3] }, fps:6 },
+    coin:      { file:'coin',       cols:4, rows:1, anim:{ spin:[0,1,2,3] }, fps:10 },
+    hourglass: { file:'hourglass',  cols:3, rows:1, anim:{ glow:[0,1,2] }, fps:8 }, // jeśli brak, gra zadziała bez power-upa
+    bgFar:     { file:'background_far' },   // opcjonalne tła
+    bgMid:     { file:'background_mid' },   // opcjonalne tła
+  };
+
+  // gdzie szukamy plików i jakie rozszerzenia testujemy
+  const FOLDERS = ["", "./", "img/", "./img/", "assets/", "assets/img/"];
+  const EXTS = [".png", ".webp"];
+  const cacheBust = () => (Date.now() % 1e9);
+
+  function tryLoad(src){
+    return new Promise((resolve,reject)=>{
+      const i=new Image();
+      i.onload = ()=> resolve(i);
+      i.onerror = ()=> reject(src);
+      const bust = src + (src.includes("?") ? "&v=" + cacheBust() : "?v=" + cacheBust());
+      i.src=bust;
+    });
+  }
+
+  async function loadSmart(base){
+    const hasExt = /\.[a-z0-9]+$/i.test(base);
+    const rel = base.replace(/^\/+/, ""); // usuń ewentualny wiodący '/'
+    const candidates = [];
+    if (hasExt) {
+      for(const f of FOLDERS) candidates.push(f + rel);
+    } else {
+      for(const f of FOLDERS) for(const e of EXTS) candidates.push(f + rel + e);
+    }
+    for(const c of candidates){
+      try{ const img=await tryLoad(c); console.log("[IMG] Loaded:", c, img.width+"x"+img.height); return {img, path:c}; }catch(e){}
+    }
+    console.warn("[IMG] Not found:", base, "tried", candidates);
+    return null;
+  }
+
+  // automatyczne usuwanie „szachownicy” (gdyby tło nie było przezroczyste)
+  function autoTransparent(img){
+    try{
+      const off=document.createElement('canvas'); off.width=img.width; off.height=img.height;
+      const o=off.getContext('2d', { willReadFrequently:true }); o.drawImage(img,0,0);
+      const d=o.getImageData(0,0,off.width,off.height); const px=d.data;
+      for(let i=0;i<px.length;i+=4){
+        const r=px[i], g=px[i+1], b=px[i+2];
+        if (Math.abs(r-g)<6 && Math.abs(g-b)<6 && r>175 && r<235) px[i+3]=0;
+      }
+      o.putImageData(d,0,0); return off;
+    }catch(e){ return img; }
+  }
+
+  async function loadAllSprites(){
+    const out={};
+    for(const [key,cfg] of Object.entries(SPRITES)){
+      const base = cfg.file;
+      const res = await loadSmart(base);
+      if (!res){ out[key]=null; continue; }
+      const img = (key==='bgFar' || key==='bgMid') ? res.img : autoTransparent(res.img);
+      const cols = cfg.cols || 1, rows = cfg.rows || 1;
+      out[key] = {
+        img, cols, rows, anim: cfg.anim||{}, fps: cfg.fps||8,
+        fw: Math.floor(img.width/cols), fh: Math.floor(img.height/rows)
+      };
+    }
+    return out;
+  }
+
+  /* =========================================================
+     1) Podstawy gry
+  ========================================================= */
+  const TILE=48, G=2200, JUMP=880, FRICTION=0.86, MAX_VX=340, DASH_V=600, AIR_DASHES=1;
+  const SLOWMO_SCALE=0.35, SLOWMO_DUR=2.8, SLOWMO_COOLDOWN=6.0;
+
+  const canvas=document.getElementById('game'); const ctx=canvas.getContext('2d');
+  const hud=document.getElementById('hud'); const btnPause=document.getElementById('btnPause');
+  const mobile={ left:document.getElementById('mLeft'), right:document.getElementById('mRight'),
+                 jump:document.getElementById('mJump'), dash:document.getElementById('mDash'),
+                 time:document.getElementById('mTime') };
+
+  const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+  const now=()=>performance.now()/1000;
+  function aabb(a,b){return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y}
+
+  class Camera{ constructor(){this.x=0;} follow(p){
+      const m=canvas.width*0.35; const cx=this.x+canvas.width*0.5;
+      if(p.x-cx>m) this.x=p.x-m-canvas.width*0.5;
+      if(cx-p.x>m) this.x=p.x+m-canvas.width*0.5;
+      this.x=clamp(this.x,0,level.pixelW-canvas.width);
+  }}
+
+  class Rect{ constructor(x,y,w,h){this.x=x;this.y=y;this.w=w;this.h=h;} }
+  class SpriteSheet{ constructor(meta){Object.assign(this,meta);} draw(dx,dy,frame,{flip=false,scale=2}={}){
+      const sx=(frame%this.cols)*this.fw, sy=Math.floor(frame/this.cols)*this.fh;
+      ctx.save(); ctx.translate(dx,dy); if(flip) ctx.scale(-1,1); ctx.imageSmoothingEnabled=false;
+      ctx.drawImage(this.img, sx,sy,this.fw,this.fh, flip?-this.fw*scale:0,0, this.fw*scale,this.fh*scale);
+      ctx.restore();
+  }}
+
+  class Animator{ constructor(frames,fps){this.frames=frames||[0];this.fps=fps||8;this.t=0;} step(dt){this.t+=dt*this.fps;} frame(){return this.frames[Math.floor(this.t)%this.frames.length];} reset(){this.t=0;} }
+
+  class Player extends Rect{
+    constructor(x,y){
+      const m=A.hero; const w=m?m.fw*2:36, h=m?m.fh*2:40;
+      super(x,y,w,h); this.vx=0; this.vy=0; this.on=false; this.flip=false;
+      this.score=0; this.lives=3; this.dashs=AIR_DASHES; this.doubleJump=true; this.slowmo=0; this.slowcool=0; this.shield=0;
+      this.animName='run'; this.ctrl=new Animator((m && (m.anim.run||[0]))||[0], m?m.fps:8);
+    }
+    setAnim(name){ this.animName=name; const m=A.hero; this.ctrl=new Animator((m && m.anim && m.anim[name])||[0], m?m.fps:8); }
+    update(dt){
+      if(this.slowmo>0){ dt*=SLOWMO_SCALE; this.slowmo=Math.max(0,this.slowmo-dt); if(this.slowmo===0) this.slowcool=SLOWMO_COOLDOWN; }
+      if(this.slowcool>0){ this.slowcool=Math.max(0,this.slowcool-dt); }
+
+      const dir=(keys.ArrowRight||keys.KeyD?1:0)-(keys.ArrowLeft||keys.KeyA?1:0);
+      if(dir!==0){ this.vx+=dir*2800*dt; this.vx=clamp(this.vx,-MAX_VX,MAX_VX); this.flip=dir<0; this.setAnim('run'); }
+      else { this.vx*=FRICTION; if(Math.abs(this.vx)<5)this.vx=0; this.setAnim('idle'); }
+      this.vy+=G*dt;
+
+      if(press('Jump')){ if(this.on){ this.vy=-JUMP; this.on=false; this.doubleJump=true; this.setAnim('jump'); }
+        else if(this.doubleJump){ this.vy=-JUMP*0.85; this.doubleJump=false; this.setAnim('jump'); } }
+      if(press('Dash') && this.dashs>0){ const h=(keys.ArrowRight||keys.KeyD?1:0)-(keys.ArrowLeft||keys.KeyA?1:0); if(h!==0){ this.vx=DASH_V*h; this.vy*=0.6; this.dashs--; toast('DASH!'); } }
+      if(press('Time') && this.slowcool===0){ this.slowmo=SLOWMO_DUR; toast('SLOW-MO'); }
+
+      // X
+      this.x+=this.vx*dt; for(const t of level.query(this)){ if(!t.s)continue; if(aabb(this,t)){ if(this.vx>0) this.x=t.x-this.w; else this.x=t.x+t.w; this.vx=0; } }
+      // Y
+      this.y+=this.vy*dt; this.on=false; for(const t of level.query(this)){ if(!t.s)continue; if(aabb(this,t)){ if(this.vy>0){ this.y=t.y-this.h; this.vy=0; this.on=true; this.dashs=AIR_DASHES; } else { this.y=t.y+t.h; this.vy=0; } } }
+
+      // pickups
+      for(const c of level.coins){ if(!c.hit && aabb(this,c)){ c.hit=true; this.score+=10; } }
+      for(const p of level.powers){ if(!p.hit && aabb(this,p)){ p.hit=true; if(p.type==='shield') this.shield=Math.min(3,this.shield+1); if(p.type==='time') this.slowcool=0; toast(p.type==='shield'?'TARCZA +1':'KLEPSYDRA'); } }
+
+      // enemies
+      for(const e of level.enemies){ if(e.dead) continue; if(aabb(this,e)){ if(this.vy>160){ e.dead=true; this.vy=-JUMP*0.7; this.score+=25; } else { if(this.shield>0){ this.shield--; e.dead=true; } else death(); } } }
+      if(level.boss && !level.boss.dead && aabb(this,level.boss)){ if(this.vy>200){ level.boss.hit(); this.vy=-JUMP*0.7; this.score+=50; } else { if(this.shield>0){ this.shield--; level.boss.hit(); } else death(); } }
+
+      if(this.y>level.pixelH+TILE) death(true);
+      this.ctrl.step(dt);
+    }
+    draw(){
+      const m=A.hero;
+      if(m){ new SpriteSheet(m).draw(this.x-cam.x,this.y,this.ctrl.frame(),{flip:this.flip,scale:2}); }
+      else { ctx.fillStyle='#ff4d4f'; ctx.fillRect(this.x-cam.x,this.y,this.w,this.h); }
+      if(this.shield>0){ ctx.strokeStyle='#00eaff'; ctx.lineWidth=3; ctx.strokeRect(this.x-cam.x-2,this.y-cam.y-2,this.w+4,this.h+4); }
+    }
+  }
+
+  class Enemy extends Rect{
+    constructor(x,y,type){
+      const m=A[type]; const w=m?m.fw*2:30, h=m?m.fh*2:30;
+      super(x,y,w,h); this.type=type; this.vx=80*(Math.random()<0.5?-1:1); this.vy=0; this.dead=false; this.flip=false;
+      const anim = (m && (m.anim.fly||m.anim.walk||[0])) || [0]; const fps=m?m.fps:8; this.ctrl=new Animator(anim,fps);
+    }
+    update(dt){ if(this.dead) return; this.vy+=G*dt; this.x+=this.vx*dt; this.y+=this.vy*dt; this.flip=this.vx<0;
+      for(const t of level.query(this)){ if(!t.s)continue; if(aabb(this,t)){ if(this.vy>0 && this.y+this.h-t.y<24){ this.y=t.y-this.h; this.vy=0; } else { this.vx*=-1; if(this.vx>0) this.x=t.x-this.w; else this.x=t.x+t.w; } } }
+      this.ctrl.step(dt);
+    }
+    draw(){ const m=A[this.type]; if(m){ new SpriteSheet(m).draw(this.x-cam.x,this.y,this.ctrl.frame(),{flip:this.flip,scale:2}); } else { ctx.fillStyle='#933'; ctx.fillRect(this.x-cam.x,this.y,this.w,this.h); } }
+  }
+
+  class Boss extends Rect{
+    constructor(x,y){ const m=A.demon; const w=m?m.fw*2:96, h=m?m.fh*2:96; super(x,y,w,h); this.vx=120; this.vy=0; this.hp=8; this.cool=0; }
+    update(dt){ this.vy+=G*dt; this.x+=this.vx*dt; this.y+=this.vy*dt;
+      for(const t of level.query(this)){ if(!t.s)continue; if(aabb(this,t)){ if(this.vy>0 && this.y+this.h-t.y<24){ this.y=t.y-this.h; this.vy=0; } else { this.vx*=-1; if(this.vx>0) this.x=t.x-this.w; else this.x=t.x+t.w; } } }
+      this.cool=Math.max(0,this.cool-dt);
+    }
+    hit(){ if(this.cool>0) return; this.hp--; this.cool=0.6; if(this.hp<=0){ this.dead=true; this.vx=0; this.vy=0; } }
+    draw(){ const m=A.demon; if(m){ new SpriteSheet(m).draw(this.x-cam.x,this.y, (A.demon.anim.idle||[0])[Math.floor((performance.now()/200)%((A.demon.anim.idle||[0]).length))], {scale:2}); } else { ctx.fillStyle='#b10'; ctx.fillRect(this.x-cam.x,this.y,this.w,this.h); } }
+  }
+
+  class Coin extends Rect{ constructor(x,y){ const m=A.coin; const w=m?m.fw*2:16, h=m?m.fh*2:16; super(x,y,w,h); this.hit=false; this.ctrl=new Animator((m && m.anim.spin)||[0], m?m.fps:10); }
+    update(dt){ this.ctrl.step(dt); } draw(){ const m=A.coin; if(m){ new SpriteSheet(m).draw(this.x-cam.x,this.y,this.ctrl.frame(),{scale:2}); } else { ctx.fillStyle='#fc0'; ctx.fillRect(this.x-cam.x,this.y,16,16); } } }
+
+  class Power extends Rect{ constructor(x,y,type){ const m=A.hourglass; const w= m?Math.max(24,m.fw*2):24, h=m?Math.max(24,m.fh*2):24; super(x,y,w,h); this.type=type; this.hit=false; this.ctrl=new Animator((m && m.anim.glow)||[0], m?m.fps:8); }
+    update(dt){ this.ctrl.step(dt); } draw(){ const m=A.hourglass; if(m){ new SpriteSheet(m).draw(this.x-cam.x,this.y,this.ctrl.frame(),{scale:2}); } else { ctx.fillStyle= this.type==='shield'?'#0ff':'#0f0'; ctx.fillRect(this.x-cam.x,this.y,20,24); } } }
+
+  /* =========================================================
+     2) Poziomy / światy
+  ========================================================= */
+  const WORLDS=[
+    { name:'Zielona Kraina', maps:[
+`................................................................................
+................................................................................
+...............................................?...............................
+..............................?.................................................
+......................###......................................................
+.............?.........................B........................................
+....P....#########.............###.....................?????.................F..
+......................###..............#####..........#########................
+.............###............................................................###
+.............................................######.....................#######
+########################.....############..###########....#####################
+########################.....############..###########....#####################`,
+`................................................................................
+................................................................................
+..............................................?................................
+.......................?........................................................
+....................#####.......................................................
+..............?.........................?..........................F............
+.....P.....#########..............#########.............?????...................
+.........................###....................###..###########...............
+..............###..........................................................####
+.............................................######.....................#######
+########################.....############..###########....#####################
+########################.....############..###########....#####################`
+    ]},
+    { name:'Jaskinie', maps:[
+`................................................................................
+....................?...........................................................
+..............................?.................................................
+.................G..............................................................
+.....................#####......................................................
+....P............?.........................?.......................F............
+..........#########...............#########..............?????..................
+.........................###.....................###..###########..............
+..............###..........................................................####
+..............................................######....................#######
+########################.....############..###########....#####################
+########################.....############..###########....#####################`
+    ]},
+    { name:'Lód', maps:[
+`................................................................................
+................................................................................
+.....................?.................................B.......................
+......................###.......................................................
+...P...........?????.............###.............?????.....F....................
+............###########........................................................
+...............................................................................
+...............................................................................
+...........................................................................####
+..............................................######.....................#######
+########################.....############..###########....#####################
+########################.....############..###########....#####################`
+    ]},
+    { name:'Pustynia', maps:[
+`................................................................................
+..............................................?................................
+...................................................E...........................
+..................###...................###....................................
+....P....?????...........###..........................?????...............F.....
+.........###########................................#########..................
+...............................................................................
+...............................................................................
+...........................................................................####
+..............................................######.....................#######
+########################.....############..###########....#####################
+########################.....############..###########....#####################`
+    ]},
+    { name:'Lawa', boss:true, maps:[
+`................................................................................
+..............................................?................................
+.....................E..........................................................
+............###......................###..........................E.............
+..P...?????.....###...............?????.............###.................F........
+.....###########.....###########.............###########.........................
+...............................................................................
+...............................................................................
+...........................................................................####
+..............................................######.....................#######
+########################.....############..###########....#####################
+########################.....############..###########....#####################`
+    ]},
+  ];
+  // Map legend: # block, P player, ? coin, B bird, E bat, G golem, T turtle, F finish
+
+  /* =========================================================
+     3) Level builder
+  ========================================================= */
+  class Level{
+    constructor(plan){
+      this.rows=plan.trim().split('\n'); this.h=this.rows.length; this.w=this.rows[0].length;
+      this.pixelW=this.w*TILE; this.pixelH=this.h*TILE;
+      this.blocks=[]; this.coins=[]; this.enemies=[]; this.powers=[]; this.flag=null; this.spawn={x:0,y:0};
+      for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++){
+        const ch=this.rows[y][x]; const px=x*TILE, py=y*TILE;
+        if(ch==='#') this.blocks.push(new Rect(px,py,TILE,TILE));
+        if(ch==='?') this.coins.push(new Coin(px+TILE*0.3, py+TILE*0.3));
+        if(ch==='P') this.spawn={x:px+TILE*0.1, y:py-TILE*0.2};
+        if(ch==='F') this.flag=new Rect(px+TILE*0.2, py-TILE*0.5, TILE*0.6, TILE*1.6);
+        if(ch==='B') this.enemies.push(new Enemy(px, py-10, 'bird'));
+        if(ch==='E') this.enemies.push(new Enemy(px, py-10, 'bat'));
+        if(ch==='G') this.enemies.push(new Enemy(px, py-10, 'golem'));
+        if(ch==='T') this.enemies.push(new Enemy(px, py-10, 'turtle'));
+      }
+    }
+    query(r){
+      const res=[];
+      const x0=Math.max(0,Math.floor(r.x/TILE)-1), x1=Math.min(this.w-1,Math.floor((r.x+r.w)/TILE)+1);
+      const y0=Math.max(0,Math.floor(r.y/TILE)-1), y1=Math.min(this.h-1,Math.floor((r.y+r.h)/TILE)+1);
+      for(let y=y0;y<=y1;y++) for(let x=x0;x<=x1;x++){ if(this.rows[y][x]==='#') res.push({x:x*TILE,y:y*TILE,w:TILE,h:TILE,s:true}); }
+      return res;
+    }
+    drawBg(){
+      const h=canvas.height, w=canvas.width;
+      if(A.bgFar){ const sp=0.2; const ox=-(cam.x*sp)%A.bgFar.img.width; for(let x=ox-w;x<w;x+=A.bgFar.img.width) ctx.drawImage(A.bgFar.img,x,0,A.bgFar.img.width,h*0.6); }
+      if(A.bgMid){ const sp=0.4; const ox=-(cam.x*sp)%A.bgMid.img.width; for(let x=ox-w;x<w;x+=A.bgMid.img.width) ctx.drawImage(A.bgMid.img,x,h*0.15,A.bgMid.img.width,h*0.7); }
+    }
+    drawTiles(){
+      for(const b of this.blocks){
+        const sx=b.x-cam.x, sy=b.y; if(sx<-TILE||sx>canvas.width||sy<-TILE||sy>canvas.height) continue;
+        ctx.fillStyle='#8b572a'; ctx.fillRect(sx,sy,TILE,TILE);
+        // trawa na górze gdy nad blokiem pusto
+        const gx=Math.floor(b.x/TILE), gy=Math.floor(b.y/TILE)-1;
+        const above = gy>=0 ? (this.rows[gy][gx]==='#') : false;
+        if(!above){ ctx.fillStyle= getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#2ecc71'; ctx.fillRect(sx,sy,TILE,10); }
+      }
+    }
+    draw(){ this.drawBg(); this.drawTiles();
+      for(const c of this.coins){ c.update(dt); c.draw(); }
+      for(const e of this.enemies){ e.draw(); }
+      if(this.flag){ const f=this.flag; ctx.fillStyle= '#2ecc71'; ctx.fillRect(f.x-cam.x + f.w-6, f.y, 6, f.h);
+        ctx.beginPath(); ctx.moveTo(f.x-cam.x, f.y+12); ctx.lineTo(f.x-cam.x+f.w, f.y+24); ctx.lineTo(f.x-cam.x, f.y+36); ctx.closePath(); ctx.fill(); }
+      for(const p of this.powers){ p.update(dt); p.draw(); }
+      if(this.boss) this.boss.draw();
+    }
+  }
+
+  /* =========================================================
+     4) Pętla gry, wejście i UI
+  ========================================================= */
+  let A={}, cam=new Camera(), level=null, player=null, keys={}, pause=false, worldIdx=0, mapIdx=0, dt=0, last=performance.now();
+
+  function toast(msg){ const d=document.createElement('div'); d.className='toast'; d.textContent=msg; document.body.appendChild(d); setTimeout(()=>d.remove(),900); }
+
+  function press(name){ const k=press.keys||{}; const cur= !!(name==='Jump'?(keys.Space||keys.ArrowUp||keys.KeyW):(name==='Dash'?(keys.ShiftLeft||keys.KeyX):(name==='Time'?keys.KeyT:false))); const was=k[name]||false; press.keys=press.keys||{}; press.keys[name]=cur; return cur && !was; }
+
+  function setupLevel(){
+    const W=WORLDS[worldIdx];
+    level=new Level(W.maps[mapIdx]);
+    player=new Player(level.spawn.x, level.spawn.y);
+    // proste power-upy: klepsydra i tarcza w późniejszych światach
+    if(worldIdx>=1) level.powers.push(new Power(level.pixelW*0.25, 6*TILE, 'shield'));
+    if(worldIdx>=2) level.powers.push(new Power(level.pixelW*0.55, 6*TILE, 'time'));
+    if(W.boss){ level.boss=new Boss(level.pixelW-8*TILE, 6*TILE); }
+    cam.x=0;
+  }
+
+  function nextLevel(){
+    const W=WORLDS[worldIdx];
+    if(W.boss && level.boss && !level.boss.dead){ toast('Pokonaj bossa!'); return; }
+    mapIdx++; if(mapIdx>=W.maps.length){ worldIdx++; mapIdx=0; if(worldIdx>=WORLDS.length){ toast('Wygrana!'); worldIdx=0; } }
+    setupLevel();
+  }
+
+  function death(resetCam=false){ player.lives--; if(player.lives<=0){ worldIdx=0; mapIdx=0; setupLevel(); } else { player.x=level.spawn.x; player.y=level.spawn.y; player.vx=player.vy=0; if(resetCam) cam.x=0; } }
+
+  function loop(ts){
+    dt=Math.min(0.033,(ts-last)/1000); last=ts;
+    if(!pause){ player.update(dt); for(const e of level.enemies) e.update(dt); if(level.boss) level.boss.update(dt); cam.follow(player); }
+    // draw
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    level.draw();
+    player.draw();
+    for(const c of level.coins){ c.update(dt); c.draw(); }
+    hud.innerHTML = `Świat: ${worldIdx+1}/${WORLDS.length} | Poziom: ${mapIdx+1}/${WORLDS[worldIdx].maps.length} | Punkty: ${player.score} | Życia: ${player.lives} | Tarcza: ${player.shield}`;
+    // meta: koniec poziomu
+    if(level.flag && aabb(player, level.flag)) nextLevel();
+    requestAnimationFrame(loop);
+  }
+
+  // Input
+  window.addEventListener('keydown', e=>{ keys[e.code]=true; if(e.code==='KeyP'){ pause=!pause; } });
+  window.addEventListener('keyup',   e=>{ keys[e.code]=false; });
+
+  // mobile buttons (hold)
+  function hold(el, on, off){ let s=false; const down=e=>{ e.preventDefault(); s=true; on(); }; const up=e=>{ e.preventDefault(); if(!s) return; s=false; off(); }; el.addEventListener('touchstart',down,{passive:false}); el.addEventListener('touchend',up,{passive:false}); el.addEventListener('touchcancel',up,{passive:false}); }
+  hold(mobile.left, ()=>{ keys.ArrowLeft=true; }, ()=>{ keys.ArrowLeft=false; });
+  hold(mobile.right,()=>{ keys.ArrowRight=true;}, ()=>{ keys.ArrowRight=false; });
+  hold(mobile.jump, ()=>{ keys.Space=true; setTimeout(()=>keys.Space=false,120); }, ()=>{});
+  hold(mobile.dash, ()=>{ keys.ShiftLeft=true; setTimeout(()=>keys.ShiftLeft=false,120); }, ()=>{});
+  hold(mobile.time, ()=>{ keys.KeyT=true; setTimeout(()=>keys.KeyT=false,120); }, ()=>{});
+  document.getElementById('btnPause').addEventListener('click', ()=>{ pause=!pause; });
+
+  // Start
+  (async function start(){
+    A = await loadAllSprites();        // wczytaj grafiki (lub wstaw fallbacki)
+    setupLevel();
+    requestAnimationFrame(loop);
+  })();
+})();
+</script>
+</body>
+</html>
