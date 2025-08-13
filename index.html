@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mariola – diagnostyka ścieżek obrazów</title>
+  <style>
+    :root{ --bg:#1b1f2a; --panel:#111; --ok:#2ecc71; --err:#ff5a36; }
+    html,body{margin:0;height:100%;background:var(--bg);color:#fff;font-family:system-ui,Segoe UI,Arial,sans-serif}
+    #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+    canvas{background:#0b1220;width:100%;max-width:1080px;aspect-ratio:16/9;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.35);image-rendering:pixelated}
+    .hud{position:fixed;left:50%;top:10px;transform:translateX(-50%);background:rgba(0,0,0,.5);padding:8px 12px;border-radius:10px;display:flex;gap:10px}
+    .panel{position:fixed;right:10px;top:10px;background:var(--panel);border:1px solid #222;border-radius:12px;padding:12px;max-width:420px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+    .panel h2{margin:0 0 8px 0;font-size:16px}
+    .row{display:flex;justify-content:space-between;gap:12px;margin:6px 0;align-items:center}
+    .row code{font-size:12px;opacity:.9}
+    .ok{color:var(--ok)} .err{color:var(--err)}
+    a{color:#8ab4ff;text-decoration:none}
+    .small{font-size:12px;opacity:.8}
+  </style>
+</head>
+<body>
+  <div class="hud" id="hud">Diagnostyka ładowania obrazów…</div>
+  <div class="panel" id="panel">
+    <h2>Stan zasobów</h2>
+    <div id="list"></div>
+    <div class="small">Strona: <code id="loc"></code></div>
+  </div>
+  <div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const list = document.getElementById('list');
+  document.getElementById('loc').textContent = window.location.href;
+
+  // >> IMPORTANT: lowercase backgrounds per your rename
+  const IMAGES = {
+    backgroundFar: 'img/background_far.png',
+    backgroundMid: 'img/background_mid.png',
+    bat:           'img/bat.png',
+    bird:          'img/bird.png',
+    coin:          'img/coin.png',
+    demon:         'img/demon.png',
+    dust:          'img/dust.png',
+    golem:         'img/golem.png',
+    hero:          'img/hero.png',
+    hourglass:     'img/hourglass.png',
+    tileset:       'img/tileset.png',
+    turtle:        'img/turtle.png',
+  };
+
+  const cacheBust = 'v=' + Date.now(); // bust GH Pages cache
+  const loaded = {};
+  const results = [];
+  let done = 0;
+  const total = Object.keys(IMAGES).length;
+
+  function addRow(name, url, status, errMsg='') {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const left = document.createElement('div');
+    left.innerHTML = `<strong>${name}</strong><br><code>${url}</code>`;
+    const right = document.createElement('div');
+    right.innerHTML = status === 'OK' ? `<span class="ok">OK</span>` : `<span class="err">BŁĄD</span>`;
+    row.appendChild(left); row.appendChild(right);
+    if (status !== 'OK' && errMsg){
+      const small = document.createElement('div');
+      small.className = 'small err';
+      small.textContent = errMsg;
+      row.appendChild(small);
+    }
+    list.appendChild(row);
+  }
+
+  function loadOne(name, src){
+    return new Promise((resolve)=>{
+      const url = src + (src.includes('?') ? '&' : '?') + cacheBust;
+      const img = new Image();
+      img.onload = ()=>{
+        loaded[name] = img;
+        results.push({name, url, status:'OK'});
+        addRow(name, url, 'OK');
+        resolve();
+      };
+      img.onerror = (e)=>{
+        results.push({name, url, status:'ERR'});
+        addRow(name, url, 'ERR', 'Nie wczytano (404/CORS). Spróbuj otworzyć URL w nowej karcie.');
+        resolve();
+      };
+      img.src = url;
+    });
+  }
+
+  (async () => {
+    for (const [name, src] of Object.entries(IMAGES)){
+      await loadOne(name, src);
+      done++;
+      hud.textContent = `Załadowano ${done}/${total}`;
+    }
+
+    const errors = results.filter(r => r.status !== 'OK');
+    if (errors.length){
+      hud.textContent = `BŁĄD: ${errors.length} obraz(ów) nie wczytano. Zobacz listę po prawej.`;
+    } else {
+      hud.textContent = `Wszystkie obrazy OK. Render testowy…`;
+      // Prosty render, by potwierdzić, że tła są poprawne
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      if (loaded.backgroundFar) ctx.drawImage(loaded.backgroundFar, 0, 0, canvas.width, canvas.height);
+      if (loaded.backgroundMid) ctx.drawImage(loaded.backgroundMid, 0, 0, canvas.width, canvas.height);
+      // pokaż miniatury kilku sprite'ów w rogu
+      let x=20, y=20, s=2;
+      const thumbs = ['hero','bat','bird','turtle','golem','demon','coin','hourglass'];
+      thumbs.forEach(k => {
+        const img = loaded[k];
+        if (!img) return;
+        // narysuj pierwszą klatkę
+        const fw = Math.floor(img.width /  (k==='demon' ? 2 : (k==='coin'?4:(k==='golem'?3:(k==='bird'?2:(k==='bat'?3:(k==='turtle'?2:(k==='hourglass'?3:4)))))));
+        const fh = Math.floor(img.height / (k==='demon' ? 2 : 1));
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(img, 0, 0, fw, fh, x, y, fw*s, fh*s);
+        x += fw*s + 12;
+        if (x > canvas.width - 200){ x = 20; y += fh*s + 12; }
+      });
+    }
+  })();
+})();
+</script>
+</body>
+</html>
